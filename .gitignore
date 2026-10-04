@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Secrets
+.env
+.streamlit/secrets.toml
+
+# Local user data
+users.db
+user_data/
+
+# Logs / OS
+*.log
+.DS_Store
+Thumbs.db

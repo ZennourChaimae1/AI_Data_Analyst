@@ -1,0 +1,11 @@
+streamlit
+pandas
+numpy
+openpyxl
+plotly
+scikit-learn
+scipy
+ollama
+reportlab
+bcrypt
+streamlit-authenticator
