@@ -7,6 +7,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+# Cloud PostgreSQL (Neon)
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+
+# Local PostgreSQL
 DB_CONFIG = {
     "dbname": os.getenv("DB_NAME"),
     "user": os.getenv("DB_USER"),
@@ -17,6 +22,11 @@ DB_CONFIG = {
 
 
 def get_connection():
+    # If DATABASE_URL exists, use Neon / cloud PostgreSQL
+    if DATABASE_URL:
+        return psycopg2.connect(DATABASE_URL)
+
+    # Otherwise, use local PostgreSQL
     return psycopg2.connect(**DB_CONFIG)
 
 
