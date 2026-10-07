@@ -8,9 +8,16 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-import ollama
+from dotenv import load_dotenv
+from groq import Groq
 
-from database import init_db, create_user, authenticate_user
+from database import (
+    init_db,
+    create_user,
+    authenticate_user,
+    get_user_id,
+    add_dataset
+)
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.linear_model import LinearRegression, LogisticRegression
@@ -143,8 +150,16 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+load_dotenv()
 
-MODEL_NAME = "qwen2.5:3b"
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = "llama-3.1-8b-instant"
+
+if not GROQ_API_KEY:
+    st.error("GROQ_API_KEY is not configured.")
+    st.stop()
+
+groq_client = Groq(api_key=GROQ_API_KEY)
 init_db()
 
 # =========================================================
@@ -262,8 +277,7 @@ page = st.sidebar.radio(
 
 st.sidebar.markdown("---")
 st.sidebar.caption("AI Data Analyst")
-st.sidebar.caption("Powered by Qwen + Ollama")
-
+GROQ_MODEL = "openai/gpt-oss-20b"
 with st.sidebar:
     st.title("🤖 AI Data Analyst")
     st.write(f"👤 **{st.session_state.username}**")
@@ -370,11 +384,18 @@ def safe_json(text):
 
 
 def ai_chat(prompt):
-    response = ollama.chat(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": prompt}],
+    response = groq_client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=[
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        temperature=0.2,
     )
-    return response["message"]["content"]
+
+    return response.choices[0].message.content
 
 
 def numeric_columns(df):
@@ -436,33 +457,77 @@ def create_pdf(df, report_text):
 # =========================================================
 
 if page == "📂 My Datasets":
+
     # =========================================================
     # 1. UPLOAD DATA
     # =========================================================
 
     st.header("📂 1. Upload your data")
 
-    uploaded_file = st.file_uploader("Choose a CSV or Excel file", type=["csv", "xlsx", "xls"])
+    uploaded_file = st.file_uploader(
+        "Choose a CSV or Excel file",
+        type=["csv", "xlsx", "xls"]
+    )
 
     if uploaded_file is not None:
+
         safe_name = os.path.basename(uploaded_file.name)
 
         if safe_name != uploaded_file.name:
             st.error("Invalid file name.")
             st.stop()
 
-        file_path = os.path.join(USER_DATA_FOLDER, safe_name)
+        file_path = os.path.join(
+            USER_DATA_FOLDER,
+            safe_name
+        )
 
         with open(file_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
 
         try:
+            # Load the dataset
             set_selected_dataset(safe_name)
-            st.success(f"✅ File loaded: {safe_name}")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Error while reading the file: {e}")
 
+            # Get current user's ID
+            user_id = get_user_id(
+                st.session_state.username
+            )
+
+            if user_id is None:
+                st.error("User not found in database.")
+                st.stop()
+
+            # Path stored in PostgreSQL
+            relative_path = os.path.join(
+                "user_data",
+                st.session_state.username,
+                safe_name
+            )
+
+            # Register dataset in PostgreSQL
+            saved = add_dataset(
+                user_id,
+                safe_name,
+                relative_path
+            )
+
+            if saved:
+                st.success(
+                    f"✅ File loaded and registered: {safe_name}"
+                )
+            else:
+                st.error(
+                    "File loaded, but could not be registered "
+                    "in PostgreSQL."
+                )
+
+            st.rerun()
+
+        except Exception as e:
+            st.error(
+                f"Error while reading the file: {e}"
+            )
     # =========================================================
     # 2. MY DATASETS + SELECT DATASET
     # =========================================================
@@ -1036,7 +1101,7 @@ if page == "🤖 AI Insights":
     # =========================================================
 
     st.title("🤖 AI Insights")
-    st.caption("Let Qwen analyze your dataset and generate actionable insights.")
+    st.caption("Let Luffy analyze your dataset and generate actionable insights.")
 
     st.subheader("🧠 AI Analysis")
 
@@ -1106,7 +1171,7 @@ Return:
 
         try:
             with st.spinner(
-                "🤖 Qwen is analyzing your dataset..."
+                "🤖 Luffy is analyzing your dataset..."
             ):
                 answer = ai_chat(prompt)
 
@@ -1154,7 +1219,7 @@ if page == "🧠 AI Agent":
 
     st.subheader("🤖 AI Dashboard Agent")
     st.write(
-        "Describe the visualization you want and Qwen will select "
+        "Describe the visualization you want and Luffy will select "
         "the appropriate chart and columns automatically."
     )
 
@@ -1208,7 +1273,7 @@ Rules:
 """
 
             try:
-                with st.spinner("🤖 Qwen is creating your visualization..."):
+                with st.spinner("🤖 Luffy is creating your visualization..."):
                     result = safe_json(ai_chat(prompt))
 
                 if not result:

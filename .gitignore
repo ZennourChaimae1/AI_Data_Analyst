@@ -17,3 +17,5 @@ user_data/
 *.log
 .DS_Store
 Thumbs.db
+
+.env

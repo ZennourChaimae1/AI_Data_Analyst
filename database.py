@@ -1,33 +1,58 @@
-import sqlite3
+import os
+import psycopg2
 import bcrypt
+from dotenv import load_dotenv
 
 
-DB_NAME = "users.db"
+load_dotenv()
+
+
+DB_CONFIG = {
+    "dbname": os.getenv("DB_NAME"),
+    "user": os.getenv("DB_USER"),
+    "password": os.getenv("DB_PASSWORD"),
+    "host": os.getenv("DB_HOST"),
+    "port": os.getenv("DB_PORT"),
+}
+
+
+def get_connection():
+    return psycopg2.connect(**DB_CONFIG)
 
 
 def init_db():
-
-    conn = sqlite3.connect(DB_NAME)
-
+    conn = get_connection()
     cursor = conn.cursor()
 
+    # Users table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
             email TEXT UNIQUE NOT NULL,
             password TEXT NOT NULL
         )
     """)
 
+    # Datasets table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS datasets (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            file_name TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     conn.commit()
+    cursor.close()
     conn.close()
 
 
 def create_user(username, email, password):
 
-    conn = sqlite3.connect(DB_NAME)
-
+    conn = get_connection()
     cursor = conn.cursor()
 
     hashed_password = bcrypt.hashpw(
@@ -36,11 +61,10 @@ def create_user(username, email, password):
     )
 
     try:
-
         cursor.execute(
             """
             INSERT INTO users (username, email, password)
-            VALUES (?, ?, ?)
+            VALUES (%s, %s, %s)
             """,
             (
                 username,
@@ -50,35 +74,34 @@ def create_user(username, email, password):
         )
 
         conn.commit()
-
         return True
 
-    except sqlite3.IntegrityError:
-
+    except psycopg2.IntegrityError:
+        conn.rollback()
         return False
 
     finally:
-
+        cursor.close()
         conn.close()
 
 
 def authenticate_user(username, password):
 
-    conn = sqlite3.connect(DB_NAME)
-
+    conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute(
         """
         SELECT password
         FROM users
-        WHERE username = ?
+        WHERE username = %s
         """,
         (username,)
     )
 
     user = cursor.fetchone()
 
+    cursor.close()
     conn.close()
 
     if user is None:
@@ -90,3 +113,70 @@ def authenticate_user(username, password):
         password.encode("utf-8"),
         stored_password
     )
+
+
+def get_user_id(username):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT id
+        FROM users
+        WHERE username = %s
+        """,
+        (username,)
+    )
+
+    user = cursor.fetchone()
+
+    cursor.close()
+    conn.close()
+
+    if user is None:
+        return None
+
+    return user[0]
+
+
+def add_dataset(user_id, file_name, file_path):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        # Check if this dataset already exists for this user
+        cursor.execute(
+            """
+            SELECT id
+            FROM datasets
+            WHERE user_id = %s
+              AND file_name = %s
+            """,
+            (user_id, file_name)
+        )
+
+        existing_dataset = cursor.fetchone()
+
+        if existing_dataset is not None:
+            return True
+
+        cursor.execute(
+            """
+            INSERT INTO datasets (user_id, file_name, file_path)
+            VALUES (%s, %s, %s)
+            """,
+            (user_id, file_name, file_path)
+        )
+
+        conn.commit()
+        return True
+
+    except Exception:
+        conn.rollback()
+        return False
+
+    finally:
+        cursor.close()
+        conn.close()

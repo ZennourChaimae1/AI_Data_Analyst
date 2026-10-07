@@ -9,3 +9,7 @@ ollama
 reportlab
 bcrypt
 streamlit-authenticator
+psycopg2-binary
+python-dotenv
+bcrypt
+groq
