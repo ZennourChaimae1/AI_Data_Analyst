@@ -370,13 +370,23 @@ def list_user_files():
 
     folder = get_user_storage_folder()
 
-    files = supabase.storage.from_("datasets").list(folder)
+    try:
+        files = supabase.storage.from_("datasets").list(folder)
 
-    return sorted([
-        f["name"]
-        for f in files
-        if f.get("name", "").lower().endswith((".csv", ".xlsx", ".xls"))
-    ])
+        return sorted([
+            f["name"]
+            for f in files
+            if f.get("name", "").lower().endswith(
+                (".csv", ".xlsx", ".xls")
+            )
+        ])
+
+    except Exception as e:
+        st.error(
+            f"Storage error: {type(e).__name__} - {str(e)}"
+        )
+        return []
+
 
 
 def read_dataset(file_name):
