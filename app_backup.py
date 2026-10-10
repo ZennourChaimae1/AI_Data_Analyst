@@ -8,9 +8,19 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-import ollama
+from dotenv import load_dotenv
+from groq import Groq
+from supabase import create_client
+from dotenv import load_dotenv
 
-from database import init_db, create_user, authenticate_user
+
+from database import (
+    init_db,
+    create_user,
+    authenticate_user,
+    get_user_id,
+    add_dataset
+)
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.linear_model import LinearRegression, LogisticRegression
@@ -143,20 +153,138 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# SUPABASE
+load_dotenv()
 
-MODEL_NAME = "qwen2.5:3b"
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+try:
+    SUPABASE_URL = st.secrets["SUPABASE_URL"]
+    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+except Exception:
+    pass
+
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+else:
+    supabase = None
+
+# GROQ
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = "llama-3.1-8b-instant"
+
+if not GROQ_API_KEY:
+    st.error("GROQ_API_KEY is not configured.")
+    st.stop()
+
+groq_client = Groq(api_key=GROQ_API_KEY)
 init_db()
+
+# =========================================================
+# AUTHENTICATION
+# =========================================================
+
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+if "username" not in st.session_state:
+    st.session_state.username = ""
+
+def safe_username(username):
+    username = username.strip()
+
+    if not username:
+        return False
+
+    if username in {".", ".."}:
+        return False
+
+    if os.path.basename(username) != username:
+        return False
+
+    if any(char in username for char in '<>:"/\\|?*'):
+        return False
+
+    return True
+
+if not st.session_state.authenticated:
+    st.title("🤖 AI Data Analyst")
+    st.caption("Analyze, visualize and explore your datasets with AI.")
+
+    tab1, tab2 = st.tabs(["🔐 Login", "📝 Create Account"])
+
+    with tab1:
+        username = st.text_input("Username", key="login_username")
+        password = st.text_input(
+            "Password",
+            type="password",
+            key="login_password"
+        )
+
+        if st.button("Login", use_container_width=True):
+            clean_username = username.strip()
+            login_ok = authenticate_user(clean_username, password)    
+
+            if login_ok:
+                st.session_state.authenticated = True
+                st.session_state.username = clean_username
+                st.rerun()
+            else:
+                st.error("Username or password incorrect.")
+    
+    
+
+    with tab2:
+        new_username = st.text_input("Username", key="register_username").strip()
+        new_email = st.text_input("Email", key="register_email")
+        new_password = st.text_input(
+            "Password",
+            type="password",
+            key="register_password"
+        )
+        confirm_password = st.text_input(
+            "Confirm password",
+            type="password",
+            key="register_confirm"
+        )
+
+        if st.button("Create Account", use_container_width=True):
+            if not new_username or not new_email or not new_password:
+                st.warning("Please fill in all fields.")
+
+            elif new_password != confirm_password:
+                st.error("Passwords do not match.")
+
+            elif not safe_username(new_username):
+                st.error("Invalid username.")
+
+            else:
+                if create_user(new_username, new_email, new_password):
+                    st.success("Account created successfully. You can now login.")
+                else:
+                    st.error("Username or email already exists.")
+
+    st.stop()
+    
+
+# =========================================================
+# USER WORKSPACE - SUPABASE STORAGE
+# =========================================================
+def get_user_storage_folder():
+    username = st.session_state.get("username")
+
+    if not username:
+        raise ValueError("User is not logged in.")
+
+    return str(username)
 
 # =========================================================
 # PROFESSIONAL SIDEBAR NAVIGATION
 # =========================================================
 
 st.sidebar.title("🤖 AI Data Analyst")
-
 st.sidebar.caption("Intelligent Data Analysis")
-
 st.sidebar.markdown("---")
-
 st.sidebar.caption("WORKSPACE")
 
 page = st.sidebar.radio(
@@ -175,61 +303,8 @@ page = st.sidebar.radio(
 )
 
 st.sidebar.markdown("---")
-
 st.sidebar.caption("AI Data Analyst")
-st.sidebar.caption("Powered by Qwen + Ollama")
-
-# =========================================================
-# AUTHENTICATION
-# =========================================================
-
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-if "username" not in st.session_state:
-    st.session_state.username = ""
-
-if not st.session_state.authenticated:
-    st.title("🤖 AI Data Analyst")
-    st.caption("Analyze, visualize and explore your datasets with AI.")
-
-    tab1, tab2 = st.tabs(["🔐 Login", "📝 Create Account"])
-
-    with tab1:
-        username = st.text_input("Username", key="login_username")
-        password = st.text_input("Password", type="password", key="login_password")
-        if st.button("Login", use_container_width=True):
-            if authenticate_user(username, password):
-                st.session_state.authenticated = True
-                st.session_state.username = username
-                st.rerun()
-            else:
-                st.error("Username or password incorrect.")
-
-    with tab2:
-        new_username = st.text_input("Username", key="register_username")
-        new_email = st.text_input("Email", key="register_email")
-        new_password = st.text_input("Password", type="password", key="register_password")
-        confirm_password = st.text_input("Confirm password", type="password", key="register_confirm")
-        if st.button("Create Account", use_container_width=True):
-            if not new_username or not new_email or not new_password:
-                st.warning("Please fill in all fields.")
-            elif new_password != confirm_password:
-                st.error("Passwords do not match.")
-            else:
-                if create_user(new_username, new_email, new_password):
-                    st.success("Account created successfully. You can now login.")
-                else:
-                    st.error("Username or email already exists.")
-
-    st.stop()
-
-# =========================================================
-# USER WORKSPACE
-# =========================================================
-
-USER_DATA_FOLDER = os.path.join("user_data", st.session_state.username)
-os.makedirs(USER_DATA_FOLDER, exist_ok=True)
-
+GROQ_MODEL = "openai/gpt-oss-20b"
 with st.sidebar:
     st.title("🤖 AI Data Analyst")
     st.write(f"👤 **{st.session_state.username}**")
@@ -247,22 +322,50 @@ with st.sidebar:
 # HELPERS
 # =========================================================
 
+
+def get_user_storage_folder():
+    username = st.session_state.get("username")
+
+    if not username:
+        raise ValueError("User is not logged in.")
+
+    return str(username)
+
+
 def list_user_files():
+    if supabase is None:
+        raise RuntimeError("Supabase is not configured.")
+
+    folder = get_user_storage_folder()
+
+    files = supabase.storage.from_("datasets").list(folder)
+
     return sorted([
-        f for f in os.listdir(USER_DATA_FOLDER)
-        if f.lower().endswith((".csv", ".xlsx", ".xls"))
+        f["name"]
+        for f in files
+        if f.get("name", "").lower().endswith((".csv", ".xlsx", ".xls"))
     ])
 
 
-def read_dataset(path):
-    if path.lower().endswith(".csv"):
-        return pd.read_csv(path)
-    return pd.read_excel(path)
+def read_dataset(file_name):
+    if supabase is None:
+        raise RuntimeError("Supabase is not configured.")
+
+    folder = get_user_storage_folder()
+    file_path = f"{folder}/{file_name}"
+
+    file_bytes = supabase.storage.from_("datasets").download(file_path)
+    buffer = io.BytesIO(file_bytes)
+
+    if file_name.lower().endswith(".csv"):
+        return pd.read_csv(buffer)
+
+    return pd.read_excel(buffer)
 
 
 def set_selected_dataset(file_name):
-    path = os.path.join(USER_DATA_FOLDER, file_name)
-    data = read_dataset(path)
+    data = read_dataset(file_name)
+
     st.session_state.selected_file = file_name
     st.session_state.selected_df = data.copy()
     st.session_state.cleaned_df = data.copy()
@@ -275,21 +378,57 @@ def set_selected_dataset(file_name):
 def get_working_df():
     if "selected_file" not in st.session_state:
         return None
+
     if st.session_state.get("cleaned_from_file") != st.session_state.selected_file:
         set_selected_dataset(st.session_state.selected_file)
+
     return st.session_state.get("cleaned_df")
 
 
 def save_working_df():
-    if "selected_file" not in st.session_state or "cleaned_df" not in st.session_state:
-        return
-    path = os.path.join(USER_DATA_FOLDER, st.session_state.selected_file)
+    if (
+        "selected_file" not in st.session_state
+        or "cleaned_df" not in st.session_state
+    ):
+        return False
+
+    if supabase is None:
+        st.error("Supabase is not configured.")
+        return False
+
+    folder = get_user_storage_folder()
+    file_name = st.session_state.selected_file
+    file_path = f"{folder}/{file_name}"
     df = st.session_state.cleaned_df
-    if path.lower().endswith(".csv"):
-        df.to_csv(path, index=False)
-    else:
-        df.to_excel(path, index=False)
-    st.session_state.selected_df = df.copy()
+
+    try:
+        if file_name.lower().endswith(".csv"):
+            file_bytes = df.to_csv(index=False).encode("utf-8")
+            content_type = "text/csv"
+        else:
+            buffer = io.BytesIO()
+            df.to_excel(buffer, index=False)
+            file_bytes = buffer.getvalue()
+            content_type = (
+                "application/vnd.openxmlformats-officedocument"
+                ".spreadsheetml.sheet"
+            )
+
+        supabase.storage.from_("datasets").upload(
+            file_path,
+            file_bytes,
+            file_options={
+                "upsert": "true",
+                "content-type": content_type,
+            },
+        )
+
+        st.session_state.selected_df = df.copy()
+        return True
+
+    except Exception as e:
+        st.error(f"Could not save dataset: {e}")
+        return False
 
 
 def dataset_context(df, sample_rows=8):
@@ -336,11 +475,18 @@ def safe_json(text):
 
 
 def ai_chat(prompt):
-    response = ollama.chat(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": prompt}],
+    response = groq_client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=[
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        temperature=0.2,
     )
-    return response["message"]["content"]
+
+    return response.choices[0].message.content
 
 
 def numeric_columns(df):
@@ -402,50 +548,159 @@ def create_pdf(df, report_text):
 # =========================================================
 
 if page == "📂 My Datasets":
+    
     # =========================================================
     # 1. UPLOAD DATA
     # =========================================================
-
     st.header("📂 1. Upload your data")
 
-    uploaded_file = st.file_uploader("Choose a CSV or Excel file", type=["csv", "xlsx", "xls"])
+    uploaded_file = st.file_uploader(
+        "Choose a CSV or Excel file",
+        type=["csv", "xlsx", "xls"]
+    )
 
     if uploaded_file is not None:
-        file_path = os.path.join(USER_DATA_FOLDER, uploaded_file.name)
-        with open(file_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
+
+        safe_name = os.path.basename(uploaded_file.name)
+
+        if safe_name != uploaded_file.name:
+            st.error("Invalid file name.")
+            st.stop()
+
         try:
-            set_selected_dataset(uploaded_file.name)
-            st.success(f"✅ File loaded: {uploaded_file.name}")
+            if supabase is None:
+                st.error("Supabase is not configured.")
+                st.stop()
+
+            # Get current user's ID
+            username = st.session_state.username
+            user_id = get_user_id(username)
+
+            if user_id is None:
+                st.error("User not found in database.")
+                st.stop()
+
+            # Read uploaded file into memory
+            file_bytes = uploaded_file.getvalue()
+
+            if safe_name.lower().endswith(".csv"):
+                df = pd.read_csv(io.BytesIO(file_bytes))
+                content_type = "text/csv"
+            else:
+                df = pd.read_excel(io.BytesIO(file_bytes))
+                content_type = (
+                    "application/vnd.openxmlformats-officedocument"
+                    ".spreadsheetml.sheet"
+                )
+
+            # Upload to the user's folder in Supabase Storage
+            storage_path = f"{username}/{safe_name}"
+
+            supabase.storage.from_("datasets").upload(
+                storage_path,
+                file_bytes,
+                file_options={
+                    "upsert": "true",
+                    "content-type": content_type,
+                },
+            )
+
+            # Select dataset in the app
+            st.session_state.selected_file = safe_name
+            st.session_state.selected_df = df.copy()
+            st.session_state.cleaned_df = df.copy()
+            st.session_state.cleaned_from_file = safe_name
+            st.session_state.chat_history = []
+            st.session_state.chat_context = {}
+            st.session_state.agent_results = []
+
+            # Keep dataset metadata in PostgreSQL
+            relative_path = storage_path
+
+            saved = add_dataset(
+                user_id,
+                safe_name,
+                relative_path
+            )
+
+            if saved:
+                st.success(
+                    f"✅ File uploaded and registered: {safe_name}"
+                )
+            else:
+                st.warning(
+                    "File uploaded to Supabase, but its metadata "
+                    "could not be registered in PostgreSQL."
+                )
+
             st.rerun()
+
         except Exception as e:
-            st.error(f"Error while reading the file: {e}")
+            st.error(f"Error while uploading the file: {e}")
 
     # =========================================================
     # 2. MY DATASETS + SELECT DATASET
     # =========================================================
 
     st.header("📁 My Datasets")
+
     files = list_user_files()
 
     if files:
         for file_name in files:
-            path = os.path.join(USER_DATA_FOLDER, file_name)
+            storage_path = f"{get_user_storage_folder()}/{file_name}"
+
             c1, c2, c3 = st.columns([5, 1, 1])
+
             with c1:
                 st.write(f"📄 {file_name}")
+
             with c2:
-                with open(path, "rb") as f:
-                    st.download_button("⬇️", f.read(), file_name=file_name, key=f"download_{file_name}")
+                try:
+                    file_bytes = (
+                        supabase.storage
+                        .from_("datasets")
+                        .download(storage_path)
+                    )
+
+                    st.download_button(
+                        "⬇️",
+                        data=file_bytes,
+                        file_name=file_name,
+                        key=f"download_{file_name}"
+                    )
+
+                except Exception as e:
+                    st.error(f"Download failed: {e}")
+
             with c3:
                 if st.button("✏️", key=f"rename_{file_name}"):
                     st.session_state[f"rename_mode_{file_name}"] = True
+
                 if st.button("🗑️", key=f"delete_{file_name}"):
-                    os.remove(path)
-                    if st.session_state.get("selected_file") == file_name:
-                        for key in ["selected_file", "selected_df", "cleaned_df", "cleaned_from_file"]:
-                            st.session_state.pop(key, None)
-                    st.rerun()
+                    try:
+                        supabase.storage.from_("datasets").remove(
+                            [storage_path]
+                        )
+
+                        if st.session_state.get("selected_file") == file_name:
+                            for key in [
+                                "selected_file",
+                                "selected_df",
+                                "cleaned_df",
+                                "cleaned_from_file",
+                            ]:
+                                st.session_state.pop(key, None)
+
+                        st.session_state.pop(
+                            f"rename_mode_{file_name}", None
+                        )
+
+                        st.success(f"Deleted: {file_name}")
+                        st.rerun()
+
+                    except Exception as e:
+                        st.error(f"Delete failed: {e}")
 
             if st.session_state.get(f"rename_mode_{file_name}", False):
                 new_name = st.text_input(
@@ -453,89 +708,181 @@ if page == "📂 My Datasets":
                     value=os.path.splitext(file_name)[0],
                     key=f"new_name_{file_name}"
                 ).strip()
+
                 rc1, rc2 = st.columns(2)
+
                 with rc1:
                     if st.button("💾 Save", key=f"save_rename_{file_name}"):
                         if not new_name:
                             st.warning("Please enter a name.")
+                        elif new_name in (".", "..") or "/" in new_name or "\\" in new_name:
+                            st.error("Invalid dataset name.")
                         else:
                             extension = os.path.splitext(file_name)[1]
                             new_file = new_name + extension
-                            new_path = os.path.join(USER_DATA_FOLDER, new_file)
-                            if os.path.exists(new_path):
-                                st.error("A file with this name already exists.")
+                            new_path = (
+                                f"{get_user_storage_folder()}/{new_file}"
+                            )
+
+                            if new_file in files:
+                                st.error(
+                                    "A file with this name already exists."
+                                )
                             else:
-                                os.rename(path, new_path)
-                                if st.session_state.get("selected_file") == file_name:
-                                    st.session_state.selected_file = new_file
-                                    st.session_state.cleaned_from_file = new_file
-                                st.session_state.pop(f"rename_mode_{file_name}", None)
-                                st.rerun()
+                                try:
+                                    file_bytes = (
+                                        supabase.storage
+                                        .from_("datasets")
+                                        .download(storage_path)
+                                    )
+
+                                    content_type = (
+                                        "text/csv"
+                                        if file_name.lower().endswith(".csv")
+                                        else "application/octet-stream"
+                                    )
+
+                                    supabase.storage.from_("datasets").upload(
+                                        new_path,
+                                        file_bytes,
+                                        file_options={
+                                            "upsert": "false",
+                                            "content-type": content_type,
+                                        },
+                                    )
+
+                                    supabase.storage.from_("datasets").remove(
+                                        [storage_path]
+                                    )
+
+                                    if st.session_state.get("selected_file") == file_name:
+                                        st.session_state.selected_file = new_file
+                                        st.session_state.cleaned_from_file = new_file
+
+                                    st.session_state.pop(
+                                        f"rename_mode_{file_name}", None
+                                    )
+
+                                    st.rerun()
+
+                                except Exception as e:
+                                    st.error(f"Rename failed: {e}")
+
                 with rc2:
                     if st.button("Cancel", key=f"cancel_rename_{file_name}"):
-                        st.session_state.pop(f"rename_mode_{file_name}", None)
+                        st.session_state.pop(
+                            f"rename_mode_{file_name}", None
+                        )
                         st.rerun()
 
         selected_file = st.selectbox(
-            "Choose a dataset to work with:", files,
-            index=files.index(st.session_state["selected_file"]) if st.session_state.get("selected_file") in files else 0,
+            "Choose a dataset to work with:",
+            files,
+            index=(
+                files.index(st.session_state["selected_file"])
+                if st.session_state.get("selected_file") in files
+                else 0
+            ),
             key="dataset_selector"
         )
+
         if st.session_state.get("selected_file") != selected_file:
             set_selected_dataset(selected_file)
 
     else:
         st.info("Upload a dataset first.")
 
-# Refresh active dataset after any upload/selection change.
-working_df = get_working_df()
-num_cols = numeric_columns(working_df) if working_df is not None else []
-cat_cols = categorical_columns(working_df) if working_df is not None else []
 
-if page == "📂 My Datasets":
-    if working_df is None:
-        st.info("Upload a dataset first.")
-    else:
-        st.success(f"✅ Active dataset: {st.session_state.selected_file}")
+    # Refresh active dataset after upload/selection changes.
+    working_df = get_working_df()
+    num_cols = (
+        numeric_columns(working_df)
+        if working_df is not None
+        else []
+    )
+    cat_cols = (
+        categorical_columns(working_df)
+        if working_df is not None
+        else []
+    )
+
+    if page == "📂 My Datasets":
+        if working_df is None:
+            st.info("Upload a dataset first.")
+        else:
+            st.success(
+                f"✅ Active dataset: {st.session_state.selected_file}"
+            )
+
+    # Refresh active dataset
+      
+    working_df = get_working_df()
+
+    num_cols = numeric_columns(working_df) if working_df is not None else []
+    cat_cols = categorical_columns(working_df) if working_df is not None else [] 
+
+    
     # =========================================================
     # 3. DATASET PREVIEW & INFORMATION
     # =========================================================
 
     st.header("👀 3. Dataset Preview")
-    if working_df is not None:
-        st.dataframe(
-                working_df.head(10),
-                use_container_width=True
-            )
-    
-else:
-    st.info("Upload or select a dataset to preview it.")
 
     if working_df is not None:
+        st.dataframe(
+            working_df.head(10),
+            use_container_width=True
+        )
+
         st.header("📋 4. Dataset Information")
+
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Rows", len(working_df))
         c2.metric("Columns", len(working_df.columns))
-        c3.metric("Missing Values", int(working_df.isna().sum().sum()))
-        c4.metric("Duplicates", int(working_df.duplicated().sum()))
-        
+        c3.metric(
+            "Missing Values",
+            int(working_df.isna().sum().sum())
+        )
+        c4.metric(
+            "Duplicates",
+            int(working_df.duplicated().sum())
+        )
+
         columns_info = pd.DataFrame({
             "Column": working_df.columns,
             "Data Type": working_df.dtypes.astype(str).values,
             "Missing Values": working_df.isna().sum().values,
             "Unique Values": working_df.nunique().values,
-            })
-        
+        })
+
         st.dataframe(columns_info, use_container_width=True)
-        
+
     else:
-        st.info("Upload or select a dataset to view its information.")
-            
-    
+        st.info("Upload or select a dataset to preview it.")
+
+
+
+# Refresh active dataset before using it
+working_df = get_working_df()
+
+num_cols = (
+    numeric_columns(working_df)
+    if working_df is not None
+    else []
+)
+
+cat_cols = (
+    categorical_columns(working_df)
+    if working_df is not None
+    else []
+)
 
 if page != "📂 My Datasets" and working_df is None:
     st.warning("No dataset selected.")
-    st.info("Go to 📂 My Datasets, upload or select a dataset, then return to this page.")
+    st.info(
+        "Go to 📂 My Datasets, upload or select a dataset, "
+        "then return to this page."
+    )
     st.stop()
 
 if page == "🧹 Data Cleaning":
@@ -993,7 +1340,7 @@ if page == "🤖 AI Insights":
     # =========================================================
 
     st.title("🤖 AI Insights")
-    st.caption("Let Qwen analyze your dataset and generate actionable insights.")
+    st.caption("Let Luffy analyze your dataset and generate actionable insights.")
 
     st.subheader("🧠 AI Analysis")
 
@@ -1063,7 +1410,7 @@ Return:
 
         try:
             with st.spinner(
-                "🤖 Qwen is analyzing your dataset..."
+                "🤖 Luffy is analyzing your dataset..."
             ):
                 answer = ai_chat(prompt)
 
@@ -1111,7 +1458,7 @@ if page == "🧠 AI Agent":
 
     st.subheader("🤖 AI Dashboard Agent")
     st.write(
-        "Describe the visualization you want and Qwen will select "
+        "Describe the visualization you want and Luffy will select "
         "the appropriate chart and columns automatically."
     )
 
@@ -1165,7 +1512,7 @@ Rules:
 """
 
             try:
-                with st.spinner("🤖 Qwen is creating your visualization..."):
+                with st.spinner("🤖 Luffy is creating your visualization..."):
                     result = safe_json(ai_chat(prompt))
 
                 if not result:

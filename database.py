@@ -1,17 +1,14 @@
 import os
+import uuid
 import psycopg2
 import bcrypt
 from dotenv import load_dotenv
-
+from psycopg2.extras import RealDictCursor
 
 load_dotenv()
 
-
-# Cloud PostgreSQL (Neon)
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-
-# Local PostgreSQL
 DB_CONFIG = {
     "dbname": os.getenv("DB_NAME"),
     "user": os.getenv("DB_USER"),
@@ -22,66 +19,70 @@ DB_CONFIG = {
 
 
 def get_connection():
-    # If DATABASE_URL exists, use Neon / cloud PostgreSQL
+    """Connect to Supabase PostgreSQL or the configured local database."""
     if DATABASE_URL:
         return psycopg2.connect(DATABASE_URL)
 
-    # Otherwise, use local PostgreSQL
+    if not all(DB_CONFIG.values()):
+        raise ValueError(
+            "Configure DATABASE_URL or all DB_* variables in .env."
+        )
+
     return psycopg2.connect(**DB_CONFIG)
 
 
 def init_db():
+    """Create the users table and ensure datasets has the required columns."""
     conn = get_connection()
-    cursor = conn.cursor()
 
-    # Users table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            username TEXT UNIQUE NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL
-        )
-    """)
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS public.users (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    username TEXT UNIQUE NOT NULL,
+                    email TEXT UNIQUE NOT NULL,
+                    password TEXT NOT NULL
+                )
+            """)
 
-    # Datasets table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS datasets (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            file_name TEXT NOT NULL,
-            file_path TEXT NOT NULL,
-            uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS public.datasets (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    user_id UUID NOT NULL
+                        REFERENCES public.users(id) ON DELETE CASCADE,
+                    file_name TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (user_id, file_name)
+                )
+            """)
 
-    conn.commit()
-    cursor.close()
-    conn.close()
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
 
 
 def create_user(username, email, password):
-
+    """Register a user with a bcrypt-hashed password."""
     conn = get_connection()
-    cursor = conn.cursor()
-
-    hashed_password = bcrypt.hashpw(
-        password.encode("utf-8"),
-        bcrypt.gensalt()
-    )
 
     try:
-        cursor.execute(
-            """
-            INSERT INTO users (username, email, password)
-            VALUES (%s, %s, %s)
-            """,
-            (
-                username,
-                email,
-                hashed_password.decode("utf-8")
-            )
-        )
+        hashed_password = bcrypt.hashpw(
+            password.encode("utf-8"),
+            bcrypt.gensalt()
+        ).decode("utf-8")
+
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO public.users (username, email, password)
+                VALUES (%s, %s, %s)
+            """, (username, email, hashed_password))
 
         conn.commit()
         return True
@@ -90,103 +91,152 @@ def create_user(username, email, password):
         conn.rollback()
         return False
 
+    except Exception:
+        conn.rollback()
+        raise
+
     finally:
-        cursor.close()
         conn.close()
 
 
 def authenticate_user(username, password):
-
+    """Authenticate a user."""
     conn = get_connection()
-    cursor = conn.cursor()
 
-    cursor.execute(
-        """
-        SELECT password
-        FROM users
-        WHERE username = %s
-        """,
-        (username,)
-    )
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT password
+                FROM public.users
+                WHERE username = %s
+            """, (username,))
+            user = cursor.fetchone()
+    finally:
+        conn.close()
 
-    user = cursor.fetchone()
-
-    cursor.close()
-    conn.close()
-
-    if user is None:
+    if not user:
         return False
 
-    stored_password = user[0].encode("utf-8")
-
-    return bcrypt.checkpw(
-        password.encode("utf-8"),
-        stored_password
-    )
+    try:
+        return bcrypt.checkpw(
+            password.encode("utf-8"),
+            user[0].encode("utf-8")
+        )
+    except (ValueError, TypeError):
+        return False
 
 
 def get_user_id(username):
-
+    """Return the UUID of a user, or None."""
     conn = get_connection()
-    cursor = conn.cursor()
 
-    cursor.execute(
-        """
-        SELECT id
-        FROM users
-        WHERE username = %s
-        """,
-        (username,)
-    )
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT id
+                FROM public.users
+                WHERE username = %s
+            """, (username,))
+            user = cursor.fetchone()
 
-    user = cursor.fetchone()
+        return str(user[0]) if user else None
 
-    cursor.close()
-    conn.close()
-
-    if user is None:
-        return None
-
-    return user[0]
+    finally:
+        conn.close()
 
 
 def add_dataset(user_id, file_name, file_path):
-
+    """Insert or update dataset metadata."""
     conn = get_connection()
-    cursor = conn.cursor()
 
     try:
-        # Check if this dataset already exists for this user
-        cursor.execute(
-            """
-            SELECT id
-            FROM datasets
-            WHERE user_id = %s
-              AND file_name = %s
-            """,
-            (user_id, file_name)
-        )
-
-        existing_dataset = cursor.fetchone()
-
-        if existing_dataset is not None:
-            return True
-
-        cursor.execute(
-            """
-            INSERT INTO datasets (user_id, file_name, file_path)
-            VALUES (%s, %s, %s)
-            """,
-            (user_id, file_name, file_path)
-        )
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO public.datasets
+                    (id, user_id, file_name, file_path, created_at)
+                VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (user_id, file_name)
+                DO UPDATE SET
+                    file_path = EXCLUDED.file_path,
+                    created_at = CURRENT_TIMESTAMP
+            """, (str(uuid.uuid4()), user_id, file_name, file_path))
 
         conn.commit()
         return True
 
-    except Exception:
+    except Exception as e:
         conn.rollback()
+        print(f"Error saving dataset metadata: {e}")
         return False
 
     finally:
-        cursor.close()
+        conn.close()
+
+
+def get_user_datasets(user_id):
+    """Return datasets belonging to one user."""
+    conn = get_connection()
+
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT id, file_name, file_path, created_at
+                FROM public.datasets
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+            """, (user_id,))
+            return cursor.fetchall()
+
+    finally:
+        conn.close()
+
+
+def delete_dataset(user_id, file_name):
+    """Delete metadata only, not the file in Supabase Storage."""
+    conn = get_connection()
+
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                DELETE FROM public.datasets
+                WHERE user_id = %s AND file_name = %s
+            """, (user_id, file_name))
+
+        conn.commit()
+        return True
+
+    except Exception as e:
+        conn.rollback()
+        print(f"Error deleting dataset metadata: {e}")
+        return False
+
+    finally:
+        conn.close()
+
+
+def rename_dataset(user_id, old_name, new_name, new_path):
+    """Update metadata after renaming a file in Supabase Storage."""
+    conn = get_connection()
+
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                UPDATE public.datasets
+                SET file_name = %s, file_path = %s
+                WHERE user_id = %s AND file_name = %s
+            """, (new_name, new_path, user_id, old_name))
+
+            if cursor.rowcount == 0:
+                conn.rollback()
+                return False
+
+        conn.commit()
+        return True
+
+    except Exception as e:
+        conn.rollback()
+        print(f"Error renaming dataset metadata: {e}")
+        return False
+
+    finally:
         conn.close()
