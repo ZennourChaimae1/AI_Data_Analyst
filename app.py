@@ -394,6 +394,7 @@ def read_dataset(file_name):
         raise RuntimeError("Supabase is not configured.")
 
     folder = get_user_storage_folder()
+    st.write("DEBUG folder:", repr(folder))
     file_path = f"{folder}/{file_name}"
 
     file_bytes = supabase.storage.from_("datasets").download(file_path)
