@@ -363,7 +363,6 @@ def get_user_storage_folder():
 
     return str(username)
 
-
 def list_user_files():
     if supabase is None:
         raise RuntimeError("Supabase is not configured.")
@@ -371,7 +370,12 @@ def list_user_files():
     folder = get_user_storage_folder()
 
     try:
-        files = supabase.storage.from_("datasets").list(folder)
+        st.write("DEBUG folder:", repr(folder))
+
+        files = supabase.storage.from_("datasets").list(
+            path=folder,
+            options={"limit": 100}
+        )
 
         return sorted([
             f["name"]
@@ -386,8 +390,6 @@ def list_user_files():
             f"Storage error: {type(e).__name__} - {str(e)}"
         )
         return []
-
-
 
 def read_dataset(file_name):
     if supabase is None:
