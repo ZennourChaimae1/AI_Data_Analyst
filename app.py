@@ -11,7 +11,6 @@ import plotly.express as px
 from dotenv import load_dotenv
 from groq import Groq
 from supabase import create_client
-from dotenv import load_dotenv
 
 
 from database import (
@@ -46,13 +45,22 @@ st.set_page_config(
 import base64
 from pathlib import Path
 
-# Load Luffy background image
+# Load Luffy background image if available. The app still works without it.
 image_path = Path(__file__).parent / "Luffy.jpeg"
+luffy_bg = ""
+if image_path.is_file():
+    try:
+        with open(image_path, "rb") as image_file:
+            luffy_bg = base64.b64encode(image_file.read()).decode("utf-8")
+    except OSError:
+        luffy_bg = ""
 
-with open(image_path, "rb") as image_file:
-    luffy_bg = base64.b64encode(
-        image_file.read()
-    ).decode("utf-8")
+background_css = (
+    f'background-image: linear-gradient(rgba(10, 10, 14, 0.72), rgba(10, 10, 14, 0.82)), '
+    f'url("data:image/jpeg;base64,{luffy_bg}");'
+    if luffy_bg else
+    'background-image: linear-gradient(rgba(10, 10, 14, 0.72), rgba(10, 10, 14, 0.82));'
+)
 
 
 st.markdown(f"""
@@ -61,12 +69,7 @@ st.markdown(f"""
     /* Main app */
     .stApp {{
         background-color: #0f1117;
-        background-image:
-            linear-gradient(
-                rgba(10, 10, 14, 0.72),
-                rgba(10, 10, 14, 0.82)
-            ),
-            url("data:image/jpeg;base64,{luffy_bg}");
+        {background_css}
         background-size: cover;
         background-position: center;
         background-attachment: fixed;
@@ -192,9 +195,10 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 try:
-    SUPABASE_URL = st.secrets["SUPABASE_URL"]
-    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+    SUPABASE_URL = st.secrets.get("SUPABASE_URL", SUPABASE_URL)
+    SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", SUPABASE_KEY)
 except Exception:
+    # Streamlit secrets may be unavailable in local development; use .env values.
     pass
 
 if SUPABASE_URL and SUPABASE_KEY:
@@ -204,7 +208,12 @@ else:
 
 # GROQ
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = "llama-3.1-8b-instant"
+try:
+    GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", GROQ_API_KEY)
+    GROQ_MODEL = st.secrets.get("GROQ_MODEL", os.getenv("GROQ_MODEL", "openai/gpt-oss-20b"))
+except Exception:
+    # Local development can use values from .env.
+    GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 
 if not GROQ_API_KEY:
     st.error("GROQ_API_KEY is not configured.")
@@ -302,14 +311,6 @@ if not st.session_state.authenticated:
 # =========================================================
 # USER WORKSPACE - SUPABASE STORAGE
 # =========================================================
-def get_user_storage_folder():
-    username = st.session_state.get("username")
-
-    if not username:
-        raise ValueError("User is not logged in.")
-
-    return str(username)
-
 # =========================================================
 # PROFESSIONAL SIDEBAR NAVIGATION
 # =========================================================
@@ -336,7 +337,6 @@ page = st.sidebar.radio(
 
 st.sidebar.markdown("---")
 st.sidebar.caption("AI Data Analyst")
-GROQ_MODEL = "openai/gpt-oss-20b"
 with st.sidebar:
     st.title("🤖 AI Data Analyst")
     st.write(f"👤 **{st.session_state.username}**")
@@ -370,8 +370,6 @@ def list_user_files():
     folder = get_user_storage_folder()
 
     try:
-        st.write("DEBUG folder:", repr(folder))
-
         files = supabase.storage.from_("datasets").list(
             path=folder,
             options={"limit": 100}
@@ -396,7 +394,6 @@ def read_dataset(file_name):
         raise RuntimeError("Supabase is not configured.")
 
     folder = get_user_storage_folder()
-    st.write("DEBUG folder:", repr(folder))
     file_path = f"{folder}/{file_name}"
 
     file_bytes = supabase.storage.from_("datasets").download(file_path)
@@ -418,6 +415,8 @@ def set_selected_dataset(file_name):
     st.session_state.chat_history = []
     st.session_state.chat_context = {}
     st.session_state.agent_results = []
+    st.session_state.pop("ai_insights", None)
+    st.session_state.pop("final_report", None)
 
 
 def get_working_df():
@@ -519,6 +518,30 @@ def safe_json(text):
     return None
 
 
+def language_instruction(language):
+    """Return a clear language instruction for AI-generated analysis content."""
+    if language == "Auto (same as AI Chat)":
+        history = st.session_state.get("chat_history", [])
+        last_user_message = next(
+            (item.get("content", "") for item in reversed(history) if item.get("role") == "user"),
+            "",
+        )
+        if last_user_message:
+            return (
+                "Write the whole response in the same language as this latest user message from AI Chat: "
+                f"{last_user_message!r}. Keep dataset column names unchanged."
+            )
+        return "Use French because no prior user message from AI Chat is available. Keep dataset column names unchanged."
+    language_names = {
+        "Français": "French (français)",
+        "English": "English",
+        "العربية": "Arabic (العربية)",
+        "Español": "Spanish (español)",
+    }
+    chosen = language_names.get(language, "French (français)")
+    return f"Write the entire response in {chosen}. Do not switch to another language. Keep dataset column names exactly as they appear in the data."
+
+
 def ai_chat(prompt):
     response = groq_client.chat.completions.create(
         model=GROQ_MODEL,
@@ -543,7 +566,11 @@ def categorical_columns(df):
 
 
 def make_bar_or_line(df, x, y, chart_type, title):
-    data = df.groupby(x, dropna=False)[y].sum().reset_index()
+    if x not in df.columns or y not in df.columns:
+        raise ValueError("The selected chart columns do not exist in the dataset.")
+    if y not in numeric_columns(df):
+        raise ValueError("Bar and line charts require a numeric Y column.")
+    data = df.groupby(x, dropna=False, observed=False)[y].sum().reset_index()
     if chart_type == "line":
         return px.line(data, x=x, y=y, title=title, markers=True)
     return px.bar(data, x=x, y=y, title=title)
@@ -658,6 +685,8 @@ if page == "📂 My Datasets":
             st.session_state.chat_history = []
             st.session_state.chat_context = {}
             st.session_state.agent_results = []
+            st.session_state.pop("ai_insights", None)
+            st.session_state.pop("final_report", None)
 
             # Keep dataset metadata in PostgreSQL
             relative_path = storage_path
@@ -1042,11 +1071,10 @@ if page == "🧹 Data Cleaning":
         "💾 Save cleaning changes to dataset",
         use_container_width=True
     ):
-        save_working_df()
-
-        st.success(
-            "Cleaning changes saved."
-        )
+        if save_working_df():
+            st.success("Cleaning changes saved.")
+        else:
+            st.error("Cleaning changes were not saved. Check the error above and try again.")
 
 if page == "📈 Statistics & EDA":
     # =========================================================
@@ -1387,6 +1415,14 @@ if page == "🤖 AI Insights":
     st.title("🤖 AI Insights")
     st.caption("Let Luffy analyze your dataset and generate actionable insights.")
 
+    insights_language = st.selectbox(
+        "🌐 Result language / Langue du résultat",
+        ["Français", "English", "العربية", "Español", "Auto (same as AI Chat)"],
+        index=0,
+        key="ai_insights_language",
+        help="Choose the language used for AI Insights. Dataset column names stay unchanged.",
+    )
+
     st.subheader("🧠 AI Analysis")
 
     st.write(
@@ -1431,6 +1467,7 @@ if page == "🤖 AI Insights":
 
         prompt = f"""
 You are a professional AI Data Analyst.
+LANGUAGE RULE: {language_instruction(insights_language)}
 Analyze only the dataset information below. Do not invent facts.
 
 Rows: {ctx['rows']}
@@ -1444,12 +1481,12 @@ Correlation highlights:
 Sample:
 {ctx['sample']}
 
-Return:
-1. Dataset Overview
-2. Data Quality
-3. Key Insights
+Return these sections, translated into the selected language:
+1. Dataset overview
+2. Data quality
+3. Key insights
 4. Correlations
-5. Potential Outliers
+5. Potential outliers
 6. Recommendations
 """
 
@@ -1575,12 +1612,27 @@ Rules:
                         "AI Generated Chart"
                     )
 
-                    if x is not None and x not in working_df.columns:
+                    valid_charts = {"bar", "line", "scatter", "histogram", "pie", "box"}
+                    if chart not in valid_charts:
+                        st.error(f"Unsupported chart type: {chart or 'not specified'}")
+                    elif x is not None and x not in working_df.columns:
                         st.error(f"Unknown X column: {x}")
-
                     elif y is not None and y not in working_df.columns:
                         st.error(f"Unknown Y column: {y}")
-
+                    elif chart in {"bar", "line"} and (not x or not y):
+                        st.error("Bar and line charts require both X and Y columns.")
+                    elif chart in {"scatter"} and (not x or not y):
+                        st.error("Scatter plots require both X and Y columns.")
+                    elif chart in {"histogram", "pie", "box"} and not x:
+                        st.error(f"{chart.title()} charts require an X column.")
+                    elif chart in {"bar", "line"} and (x not in working_df.columns or y not in working_df.columns):
+                        st.error("Please select valid X and Y columns.")
+                    elif chart in {"bar", "line", "scatter"} and (x not in working_df.columns or y not in working_df.columns):
+                        st.error("Please select valid X and Y columns.")
+                    elif chart in {"histogram", "box"} and x not in num_cols:
+                        st.error(f"{chart.title()} charts require a numeric column.")
+                    elif chart == "pie" and x not in cat_cols:
+                        st.error("Pie charts require a categorical column.")
                     elif chart == "bar" and x and y:
                         st.plotly_chart(
                             make_bar_or_line(
@@ -1605,7 +1657,7 @@ Rules:
                             use_container_width=True
                         )
 
-                    elif chart == "scatter" and x and y:
+                    elif chart == "scatter" and x and y and x in num_cols and y in num_cols:
                         st.plotly_chart(
                             px.scatter(
                                 working_df,
@@ -2023,10 +2075,19 @@ if page == "📄 Reports":
 
     st.header("📄 11. AI Report")
 
+    report_language = st.selectbox(
+        "🌐 Report language / Langue du rapport",
+        ["Français", "English", "العربية", "Español", "Auto (same as AI Chat)"],
+        index=0,
+        key="ai_report_language",
+        help="Choose the language for the TXT and PDF report. Dataset column names stay unchanged.",
+    )
+
     if st.button("Generate Final AI Report", use_container_width=True):
         ctx = dataset_context(working_df)
         prompt = f"""
-    Create a concise professional data analysis report.
+    Create a concise, professional data analysis report.
+    LANGUAGE RULE: {language_instruction(report_language)}
     Use only these facts and the sample. Do not invent.
     Rows: {ctx['rows']}
     Columns: {ctx['columns']}
@@ -2037,12 +2098,12 @@ if page == "📄 Reports":
     Sample:
     {ctx['sample']}
 
-    Sections:
-    1. Executive Summary
-    2. Data Quality
-    3. Key Insights
-    4. Statistical Observations
-    5. Business Recommendations
+    Sections (translate the headings into the selected language):
+    1. Executive summary
+    2. Data quality
+    3. Key insights
+    4. Statistical observations
+    5. Business recommendations
     """
         try:
             with st.spinner("Generating report..."):
@@ -2103,6 +2164,10 @@ if page == "💬 AI Chat":
 
     User request: {user_message}
 
+    You are called Luffy. For casual conversation, greetings, small talk, or questions about your name/identity
+    (for example "hi", "how are you?", "what's your name?"), choose action "answer". Do not require dataset context
+    for these questions. Reply naturally in the same language as the user's message. Your assistant name is Luffy.
+    For dataset questions, answer using the provided dataset context only.
     Choose one action: answer, visualization, regression, classification, clustering, cleaning.
     Return ONLY JSON:
     {{
@@ -2142,30 +2207,46 @@ if page == "💬 AI Chat":
 
                     if action == "answer":
                         answer_prompt = f"""
-    You are a Data Analyst. Answer the user's question using only the dataset information below.
-    Columns: {ctx['columns']}
-    Numeric: {ctx['numeric']}
-    Categorical: {ctx['categorical']}
-    Sample:
+    You are Luffy, a friendly and helpful AI assistant who is also a data analyst.
+    First identify the kind of user message:
+    - If it is casual conversation, a greeting, small talk, or a question about your name/identity (such as
+      "how are you?", "what's your name?", "who are you?"), answer naturally and warmly without forcing a dataset analysis.
+      Your name is Luffy. Match the language used by the user.
+    - If it is a question about the dataset, answer using only the dataset information below and do not invent numbers.
+    - If it is a general non-data question, answer briefly when you can, and be clear if you are unsure.
+    Dataset columns: {ctx['columns']}
+    Numeric columns: {ctx['numeric']}
+    Categorical columns: {ctx['categorical']}
+    Dataset sample:
     {ctx['sample']}
-    Question: {user_message}
-    Do not invent numbers. Be concise.
+    Recent conversation: {history}
+    User question: {user_message}
+    Be concise, conversational, and helpful.
     """
                         answer = ai_chat(answer_prompt)
                         st.markdown(answer)
 
                     elif action == "visualization":
-                        if x not in working_df.columns:
+                        valid_charts = {"bar", "line", "scatter", "histogram", "pie", "box"}
+                        if chart not in valid_charts:
+                            answer = "❌ Unsupported chart type. Choose bar, line, scatter, histogram, pie or box."
+                        elif not isinstance(x, str) or x not in working_df.columns:
                             answer = f"❌ Column not found: {x}"
-                        elif y is not None and y not in working_df.columns:
+                        elif y is not None and (not isinstance(y, str) or y not in working_df.columns):
                             answer = f"❌ Column not found: {y}"
-                        elif chart == "bar" and y:
+                        elif chart in {"bar", "line", "scatter"} and not y:
+                            answer = f"❌ The {chart} chart requires both X and Y columns."
+                        elif chart in {"histogram", "box"} and x not in numeric_columns(working_df):
+                            answer = f"❌ {chart.title()} requires a numeric column for X."
+                        elif chart == "pie" and x not in categorical_columns(working_df):
+                            answer = "❌ Pie charts require a categorical column."
+                        elif chart == "bar" and y and y in numeric_columns(working_df):
                             st.plotly_chart(make_bar_or_line(working_df, x, y, "bar", f"{y} by {x}"), use_container_width=True)
                             answer = f"📊 Bar chart: {y} by {x}."
-                        elif chart == "line" and y:
+                        elif chart == "line" and y and y in numeric_columns(working_df):
                             st.plotly_chart(make_bar_or_line(working_df, x, y, "line", f"{y} by {x}"), use_container_width=True)
                             answer = f"📈 Line chart: {y} by {x}."
-                        elif chart == "scatter" and y:
+                        elif chart == "scatter" and y and x in numeric_columns(working_df) and y in numeric_columns(working_df):
                             st.plotly_chart(px.scatter(working_df, x=x, y=y), use_container_width=True)
                             answer = f"📊 Scatter plot: {y} vs {x}."
                         elif chart == "histogram":
@@ -2180,7 +2261,7 @@ if page == "💬 AI Chat":
                             st.plotly_chart(px.box(working_df, y=x), use_container_width=True)
                             answer = f"📦 Box plot of {x}."
                         else:
-                            answer = "❌ I could not create the requested visualization."
+                            answer = "❌ I could not create the requested visualization. Check that the selected columns have the right data types (bar/line need a numeric Y; scatter needs numeric X and Y)."
                         st.markdown(answer)
 
                     elif action == "cleaning":
